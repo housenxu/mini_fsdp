@@ -11,7 +11,7 @@ def main() -> None:
         sys.executable,
         "benchmark.py",
         "--strategy",
-        "minifsdp",
+        "minifsdp-layerwise",
         "--steps",
         "10",
         "--warmup",

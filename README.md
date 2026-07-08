@@ -7,9 +7,12 @@ FSDP/ZeRO-3 rather than to replace production PyTorch FSDP.
 ## Resume Summary
 
 MiniFSDP implements parameter sharding, forward all-gather, backward
-reduce-scatter, and sharded optimizer-state management. It also includes DDP
-baselines, communication analysis, CUDA memory measurement, throughput
-benchmarking, and PyTorch Profiler traces.
+reduce-scatter, and sharded optimizer-state management. The first strategy wraps
+the whole model as one FSDP unit. The second strategy, `minifsdp-layerwise`,
+wraps each `nn.Linear` block independently to better reproduce FSDP's
+layer-level parameter lifecycle. The repo also includes DDP baselines,
+communication analysis, CUDA memory measurement, throughput benchmarking, and
+PyTorch Profiler traces.
 
 ## Core Idea
 
@@ -41,6 +44,7 @@ MiniFSDP/
     communication.py     # communication cost estimates
     model.py             # tiny MLP workload
   benchmark.py           # DDP vs MiniFSDP benchmark
+  run_layerwise_experiments.sh
   train_toy_fsdp.py      # simple MiniFSDP training script
   train_ddp.py           # DDP baseline
   benchmark_memory.py    # theoretical memory comparison
@@ -68,6 +72,12 @@ Two-process MiniFSDP:
 torchrun --nproc_per_node=2 benchmark.py --strategy minifsdp
 ```
 
+Layer-wise MiniFSDP:
+
+```bash
+torchrun --nproc_per_node=2 benchmark.py --strategy minifsdp-layerwise
+```
+
 Two-process DDP baseline:
 
 ```bash
@@ -79,6 +89,12 @@ Profile MiniFSDP:
 ```bash
 torchrun --nproc_per_node=2 benchmark.py --strategy minifsdp --profile --trace-dir traces
 tensorboard --logdir traces
+```
+
+Run the main comparison used in the README:
+
+```bash
+bash run_layerwise_experiments.sh
 ```
 
 Experimental communication prefetch:
@@ -109,6 +125,11 @@ python communication_report.py
 8. Records profiler ranges such as `minifsdp::all_gather_params` and
    `minifsdp::reduce_scatter_grads`.
 
+`LayerWiseMiniFSDP` in `toy_fsdp/layerwise.py` recursively wraps selected leaf
+modules, currently `nn.Linear`, so the training step contains multiple smaller
+FSDP units instead of one whole-model unit. This creates a more realistic
+all-gather/compute/reduce-scatter pattern in profiler traces.
+
 ## What to Look for in Profiler
 
 Important trace ranges:
@@ -133,8 +154,20 @@ For a model with `P` parameters and `N` ranks:
 | MiniFSDP | `P/N` | `P/N` | `2P/N` | `reduce_scatter(P)` |
 
 MiniFSDP saves steady-state training memory but introduces parameter
-all-gather before computation. Real PyTorch FSDP reduces peak memory by wrapping
-modules layer by layer and overlapping all-gather with compute.
+all-gather before computation. Whole-model MiniFSDP materializes all parameters
+at once, while layer-wise MiniFSDP materializes smaller blocks independently,
+which is closer to PyTorch FSDP's design.
+
+Example result on 2x RTX 4090, PyTorch 2.1.2+cu121, hidden_dim=8192:
+
+| Strategy | Peak CUDA memory | Throughput | Forward collective | Backward collective |
+| --- | ---: | ---: | --- | --- |
+| DDP | 1578.52 MiB | 2235.95 samples/s | none | all_reduce(grads) |
+| Whole-model MiniFSDP | 1318.15 MiB | 1892.61 samples/s | all_gather(params) | reduce_scatter(grads) |
+
+The result shows the expected tradeoff: MiniFSDP reduces peak memory but loses
+throughput because this educational implementation does not fully overlap
+communication and computation.
 
 ## Limitations
 

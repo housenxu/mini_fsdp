@@ -6,7 +6,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel
 from torch.profiler import record_function
 
-from toy_fsdp import MiniFSDP, TinyMLP, make_batch
+from toy_fsdp import LayerWiseMiniFSDP, MiniFSDP, TinyMLP, make_batch
 from toy_fsdp.communication import estimate_ddp_bytes, estimate_minifsdp_bytes
 from toy_fsdp.distributed import cleanup_distributed, setup_distributed, synchronize
 from toy_fsdp.metrics import WallTimer, format_bytes, maybe_profile, peak_memory_bytes, reset_peak_memory
@@ -14,7 +14,11 @@ from toy_fsdp.metrics import WallTimer, format_bytes, maybe_profile, peak_memory
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare DDP and MiniFSDP.")
-    parser.add_argument("--strategy", choices=["ddp", "minifsdp"], default="minifsdp")
+    parser.add_argument(
+        "--strategy",
+        choices=["ddp", "minifsdp", "minifsdp-layerwise"],
+        default="minifsdp",
+    )
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -42,7 +46,10 @@ def build_model(args: argparse.Namespace, device: torch.device, local_rank: int,
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         return model, optimizer
 
-    model = MiniFSDP(model, prefetch=args.prefetch)
+    if args.strategy == "minifsdp-layerwise":
+        model = LayerWiseMiniFSDP(model, prefetch=args.prefetch)
+    else:
+        model = MiniFSDP(model, prefetch=args.prefetch)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     return model, optimizer
 
@@ -61,13 +68,13 @@ def train_step(model, optimizer, args, device, rank: int, step: int) -> float:
         loss = model(x, y)
         loss.backward()
 
-    if args.strategy == "minifsdp":
+    if args.strategy.startswith("minifsdp"):
         model.reduce_scatter_grad()
 
     with record_function(f"{args.strategy}::optimizer_step"):
         optimizer.step()
 
-    if args.strategy == "minifsdp":
+    if args.strategy.startswith("minifsdp"):
         model.reshard()
 
     return float(loss.detach().item())
@@ -80,7 +87,7 @@ def main() -> None:
 
     model, optimizer = build_model(args, ctx.device, ctx.local_rank, ctx.world_size)
     param_numel = sum(p.numel() for p in model.parameters())
-    if args.strategy == "minifsdp":
+    if args.strategy.startswith("minifsdp"):
         param_numel = model.total_numel
 
     for step in range(args.warmup):
@@ -114,9 +121,11 @@ def main() -> None:
         print(f"forward_collective={comm.forward_collective}")
         print(f"backward_collective={comm.backward_collective}")
         print(f"approx_comm_bytes_per_step={format_bytes(comm.bytes_per_step)}")
-        if args.strategy == "minifsdp":
+        if args.strategy.startswith("minifsdp"):
             print(f"all_gathers={model.num_all_gathers}")
             print(f"reduce_scatters={model.num_reduce_scatters}")
+        if args.strategy == "minifsdp-layerwise":
+            print(f"wrapped_modules={model.num_wrapped_modules}")
 
     cleanup_distributed()
 
