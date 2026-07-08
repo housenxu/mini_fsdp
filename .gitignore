@@ -8,3 +8,7 @@ __pycache__/
 wandb/
 runs/
 traces/
+traces_*/
+evidence/
+*.nsys-rep
+*.qdrep

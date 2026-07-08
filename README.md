@@ -144,6 +144,47 @@ On CUDA with multiple GPUs, NCCL collectives should appear under these ranges.
 The `--prefetch` flag launches an asynchronous all-gather before the next
 forward to demonstrate the idea behind communication/computation overlap.
 
+## Evidence Collection
+
+The benchmark numbers are only the top-level result. For interview discussion,
+collect evidence from multiple layers:
+
+| Tool | What it proves |
+| --- | --- |
+| `nvidia-smi dmon` | GPU utilization, memory usage, SM utilization during the run |
+| `NCCL_DEBUG=INFO` | actual collective communication calls, such as all-gather and reduce-scatter |
+| PyTorch Profiler | operator timeline, CUDA kernels, memory events, custom `minifsdp::*` ranges |
+| Nsight Systems | CUDA/NCCL timeline and possible communication-computation overlap |
+| `htop` | CPU process count and host-side overhead |
+
+Run the full lightweight evidence script:
+
+```bash
+bash tools/collect_evidence.sh
+```
+
+Run individual tools:
+
+```bash
+# Terminal 1: monitor GPU utilization while benchmark runs
+bash tools/monitor_nvidia_smi.sh evidence/nvidia_smi_dmon.log
+
+# Terminal 2: run benchmark with NCCL collective logs
+bash tools/run_nccl_debug.sh
+
+# Generate PyTorch Profiler traces
+bash tools/run_torch_profiler.sh
+
+# Optional: if Nsight Systems is installed
+bash tools/run_nsight_systems.sh
+```
+
+For overlap analysis, open the PyTorch Profiler or Nsight Systems timeline and
+look for whether NCCL kernels overlap with GEMM/activation kernels. This
+educational implementation mostly exposes communication rather than hiding it;
+production FSDP improves this with prefetching, smaller wrap units, and CUDA
+stream scheduling.
+
 ## Expected Analysis
 
 For a model with `P` parameters and `N` ranks:
