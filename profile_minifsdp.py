@@ -10,6 +10,8 @@ def main() -> None:
     cmd = [
         sys.executable,
         "benchmark.py",
+        "--model",
+        "mlp",
         "--strategy",
         "minifsdp-layerwise",
         "--steps",

@@ -12,7 +12,11 @@ the whole model as one FSDP unit. The second strategy, `minifsdp-layerwise`,
 wraps each `nn.Linear` block independently to better reproduce FSDP's
 layer-level parameter lifecycle. The repo also includes DDP baselines,
 communication analysis, CUDA memory measurement, throughput benchmarking, and
-PyTorch Profiler traces.
+PyTorch Profiler traces. An `fsdp2` strategy now applies PyTorch's official
+`fully_shard` API to the same model and benchmark. This provides a real DTensor
+baseline instead of claiming that the flat-parameter MiniFSDP is equivalent to
+FSDP2. The default workload is a causal Transformer, and FSDP2 communication
+groups follow `TransformerBlock` boundaries rather than individual Linears.
 
 ## Core Idea
 
@@ -42,7 +46,9 @@ MiniFSDP/
     distributed.py       # torchrun/NCCL/Gloo setup
     metrics.py           # memory, throughput, profiler helpers
     communication.py     # communication cost estimates
-    model.py             # tiny MLP workload
+    model.py             # TinyMLP and causal TinyTransformerLM workloads
+    fsdp2.py             # DeviceMesh/DTensor FSDP2 integration
+    checkpoint.py        # full and distributed checkpoint helpers
   benchmark.py           # DDP vs MiniFSDP benchmark
   run_layerwise_experiments.sh
   train_toy_fsdp.py      # simple MiniFSDP training script
@@ -66,17 +72,38 @@ Single-process MiniFSDP smoke test:
 python train_toy_fsdp.py
 ```
 
-Two-process MiniFSDP:
+Two-process whole-model MiniFSDP on the Transformer:
 
 ```bash
-torchrun --nproc_per_node=2 benchmark.py --strategy minifsdp
+torchrun --nproc_per_node=2 benchmark.py --model transformer --strategy minifsdp
 ```
 
-Layer-wise MiniFSDP:
+Legacy layer-wise MiniFSDP on the MLP:
 
 ```bash
-torchrun --nproc_per_node=2 benchmark.py --strategy minifsdp-layerwise
+torchrun --nproc_per_node=2 benchmark.py --model mlp --strategy minifsdp-layerwise
 ```
+
+Official FSDP2/DTensor path:
+
+```bash
+torchrun --nproc_per_node=2 benchmark.py --model transformer --strategy fsdp2
+```
+
+Two-rank DTensor and numerical contract test:
+
+```bash
+PYTHONPATH=. torchrun --standalone --nproc_per_node=2 \
+  tests/test_fsdp2_integration.py
+```
+
+See [`docs/fsdp2_dtensor.md`](docs/fsdp2_dtensor.md) for the architecture,
+mixed precision, explicit prefetch, DCP checkpoint, and profiler commands.
+See [`docs/fsdp2_gap_analysis.md`](docs/fsdp2_gap_analysis.md) for the prioritized
+correctness, performance, topology, and reliability backlog.
+See [`docs/performance_profiling.md`](docs/performance_profiling.md) for the
+MFU definitions, practical GEMM ceiling, PyTorch Profiler, Nsight Systems,
+Nsight Compute, and Tensor Core investigation workflow.
 
 Two-process DDP baseline:
 
@@ -130,6 +157,20 @@ modules, currently `nn.Linear`, so the training step contains multiple smaller
 FSDP units instead of one whole-model unit. This creates a more realistic
 all-gather/compute/reduce-scatter pattern in profiler traces.
 
+`TinyTransformerLM` contains learned token/position embeddings, causal SDPA
+attention, SwiGLU MLPs, pre-norm residual blocks, final normalization, and a
+language-model head that may share and freeze the token embedding parameter.
+
+`apply_fsdp2` in `toy_fsdp/fsdp2.py` calls `fully_shard` bottom-up on each
+`TransformerBlock` and finally the root model. Each block is one communication
+group; the root group owns embeddings, final norm, and the tied LM head.
+Original parameters remain individually addressable and become DTensors with
+sharded placements outside compute. FSDP2 hooks perform parameter AllGather,
+resharding, and gradient ReduceScatter automatically, so this strategy does
+not call MiniFSDP's manual `reduce_scatter_grad()` method.
+`toy_fsdp/checkpoint.py` uses Distributed Checkpoint APIs for full or
+reshardable model and optimizer state.
+
 ## What to Look for in Profiler
 
 Important trace ranges:
@@ -139,6 +180,7 @@ Important trace ranges:
 - `minifsdp::flatten_full_grads`
 - `minifsdp::reduce_scatter_grads`
 - `minifsdp::optimizer_step`
+- `transformer::block_N`
 
 On CUDA with multiple GPUs, NCCL collectives should appear under these ranges.
 The `--prefetch` flag launches an asynchronous all-gather before the next
@@ -177,6 +219,9 @@ bash tools/run_torch_profiler.sh
 
 # Optional: if Nsight Systems is installed
 bash tools/run_nsight_systems.sh
+
+# Optional: inspect selected kernels with Nsight Compute
+bash tools/run_nsight_compute.sh
 ```
 
 For overlap analysis, open the PyTorch Profiler or Nsight Systems timeline and
@@ -212,10 +257,13 @@ communication and computation.
 
 ## Limitations
 
-This repo intentionally keeps the implementation small. It does not implement
-production features such as DTensor, mixed precision policies, CPU offload,
-sharded checkpointing, nested auto-wrap policies, or CUDA stream memory
-management.
+The hand-written MiniFSDP intentionally stays small and does not reimplement
+FSDP2's DTensor memory manager. The official `fsdp2` strategy supplies DTensor,
+mixed precision, CPU offload, prefetch controls, and sharded checkpoint APIs,
+and the benchmark now uses a Transformer-block wrap policy. The project still
+lacks meta-device initialization, gradient accumulation, activation
+checkpointing, 2D hybrid sharding, TP composition, async checkpointing,
+elastic recovery, and multi-node topology experiments.
 
 ## GitHub Description
 
@@ -227,4 +275,6 @@ MiniFSDP: an educational PyTorch Distributed implementation of parameter shardin
 
 - PyTorch FSDP docs: https://docs.pytorch.org/docs/stable/fsdp.html
 - PyTorch FSDP2 tutorial: https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html
+- PyTorch FSDP2 API: https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
+- PyTorch DTensor API: https://docs.pytorch.org/docs/stable/distributed.tensor.html
 - PyTorch FSDP source: https://github.com/pytorch/pytorch/tree/main/torch/distributed/fsdp

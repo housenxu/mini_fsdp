@@ -8,6 +8,7 @@ WARMUP="${WARMUP:-5}"
 
 echo "== DDP =="
 torchrun --nproc_per_node=2 benchmark.py \
+  --model mlp \
   --strategy ddp \
   --hidden-dim "${HIDDEN_DIM}" \
   --batch-size "${BATCH_SIZE}" \
@@ -17,6 +18,7 @@ torchrun --nproc_per_node=2 benchmark.py \
 echo
 echo "== Whole-model MiniFSDP =="
 torchrun --nproc_per_node=2 benchmark.py \
+  --model mlp \
   --strategy minifsdp \
   --hidden-dim "${HIDDEN_DIM}" \
   --batch-size "${BATCH_SIZE}" \
@@ -26,6 +28,7 @@ torchrun --nproc_per_node=2 benchmark.py \
 echo
 echo "== Layer-wise MiniFSDP =="
 torchrun --nproc_per_node=2 benchmark.py \
+  --model mlp \
   --strategy minifsdp-layerwise \
   --hidden-dim "${HIDDEN_DIM}" \
   --batch-size "${BATCH_SIZE}" \
@@ -35,6 +38,7 @@ torchrun --nproc_per_node=2 benchmark.py \
 echo
 echo "== Layer-wise MiniFSDP profiler =="
 torchrun --nproc_per_node=2 benchmark.py \
+  --model mlp \
   --strategy minifsdp-layerwise \
   --hidden-dim "${HIDDEN_DIM}" \
   --batch-size "${BATCH_SIZE}" \

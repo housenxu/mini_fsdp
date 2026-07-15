@@ -6,7 +6,7 @@ from typing import Iterator
 import torch
 import torch.distributed as dist
 from torch import nn
-from torch.profiler import record_function
+from .profiling import trace_range
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,7 @@ class MiniFSDP(nn.Module):
         if self.prefetch and self._prefetch_work is None and self._prefetched_full_param is None:
             self.prefetch_full_params()
         self.unshard()
-        with record_function("minifsdp::compute_forward"):
+        with trace_range("minifsdp::compute_forward"):
             return self.module(*args, **kwargs)
 
     @torch.no_grad()
@@ -128,7 +128,7 @@ class MiniFSDP(nn.Module):
 
         local = self.flat_param_shard.detach()
         self._prefetch_parts = [torch.empty_like(local) for _ in range(self.world_size)]
-        with record_function("minifsdp::prefetch_all_gather_params"):
+        with trace_range("minifsdp::prefetch_all_gather_params"):
             self._prefetch_work = dist.all_gather(
                 self._prefetch_parts,
                 local,
@@ -140,7 +140,7 @@ class MiniFSDP(nn.Module):
     def unshard(self) -> None:
         """All-gather local shards and rebuild full module parameters."""
         local = self.flat_param_shard.detach()
-        with record_function("minifsdp::all_gather_params"):
+        with trace_range("minifsdp::all_gather_params"):
             if self._prefetch_work is not None:
                 self._prefetch_work.wait()
                 assert self._prefetch_parts is not None
@@ -169,7 +169,7 @@ class MiniFSDP(nn.Module):
     @torch.no_grad()
     def reduce_scatter_grad(self, average: bool = True) -> None:
         """Reduce full gradients and keep only this rank's gradient shard."""
-        with record_function("minifsdp::flatten_full_grads"):
+        with trace_range("minifsdp::flatten_full_grads"):
             grad_parts = []
             for info, param in zip(self.param_infos, self._original_params):
                 if param.grad is None:
@@ -191,7 +191,7 @@ class MiniFSDP(nn.Module):
                 )
                 full_grad = torch.cat([full_grad, pad])
 
-        with record_function("minifsdp::reduce_scatter_grads"):
+        with trace_range("minifsdp::reduce_scatter_grads"):
             if self.world_size == 1:
                 shard_grad = full_grad
             else:

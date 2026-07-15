@@ -12,3 +12,6 @@ traces_*/
 evidence/
 *.nsys-rep
 *.qdrep
+
+benchmark_results/
+*.ncu-rep
